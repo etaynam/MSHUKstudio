@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Papa from "papaparse";
 import { supabase } from "../lib/supabaseClient";
 import { Modal } from "../components/ui/modal";
+import JSZip from "jszip";
+import { saveAs } from "file-saver";
 import {
   Package,
   Barcode,
@@ -18,6 +20,11 @@ import {
   Loader2,
   Search,
   Hash,
+  X,
+  ChevronDown,
+  ChevronUp,
+  Download,
+  ExternalLink,
 } from "lucide-react";
 
 interface ProductSummary {
@@ -50,6 +57,7 @@ interface TemplateOption {
   layouts: TemplateLayout[];
   previewUrl?: string;
   metadata?: any;
+  details?: any;
 }
 
 interface CampaignRecord {
@@ -231,17 +239,15 @@ export default function CampaignsPage() {
   const [generationResults, setGenerationResults] = useState<
     { dealId: string; layout?: string | null; status: string; url?: string; data?: any }[]
   >([]);
-  const [resultsModalOpen, setResultsModalOpen] = useState(false);
+  const [resultsDockOpen, setResultsDockOpen] = useState(true);
+  const [activeResultIndex, setActiveResultIndex] = useState<number | null>(null);
+  const [activeSearchDealId, setActiveSearchDealId] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
 
   const template = useMemo(
     () => templates.find((t) => t.id === selectedTemplateId) ?? templates[0],
     [selectedTemplateId, templates]
   );
-
-  const selectedTemplateFields = useMemo(() => {
-    if (!template) return [];
-    return template.fields.filter((field) => selectedFields.includes(field.id));
-  }, [template, selectedFields]);
 
   const templateMap = useMemo(() => {
     return templates.reduce<Record<string, TemplateOption>>((acc, tpl) => {
@@ -249,6 +255,22 @@ export default function CampaignsPage() {
       return acc;
     }, {});
   }, [templates]);
+
+  const selectedTemplateFields = useMemo(() => {
+    if (!template) return [];
+    return template.fields.filter((field) => selectedFields.includes(field.id));
+  }, [template, selectedFields]);
+
+  const selectedTemplatePreview = useMemo(() => {
+    if (!template) return "";
+    return (
+      template.previewUrl ||
+      template.metadata?.formats?.[0]?.preview_url ||
+      (template as any)?.preview_url ||
+      template.details?.preview_url ||
+      ""
+    );
+  }, [template]);
 
   const applyTemplateDefaults = useCallback(
     (templateId?: string, fields?: string[], layouts?: string[], explicitTemplate?: TemplateOption) => {
@@ -260,6 +282,20 @@ export default function CampaignsPage() {
     },
     [templates]
   );
+
+  const filteredProducts = useMemo(() => {
+    if (!searchQuery.trim()) return products;
+    const query = searchQuery.trim().toLowerCase();
+    return products.filter((product) => {
+      return (
+        product.name.toLowerCase().includes(query) ||
+        (product.barcode ?? "").toLowerCase().includes(query) ||
+        (product.supplier_name ?? "").toLowerCase().includes(query)
+      );
+    });
+  }, [products, searchQuery]);
+
+  const displayedProducts = useMemo(() => filteredProducts.slice(0, 24), [filteredProducts]);
 
   const showToast = (type: "success" | "error", message: string) => {
     setToast({ type, message });
@@ -337,6 +373,27 @@ export default function CampaignsPage() {
     setMappingDraft(createEmptyMapping());
     setPendingMapping(null);
   }, [selectedTemplateId]);
+
+  useEffect(() => {
+    if (!activeSearchDealId) {
+      document.body.style.overflow = "";
+      return;
+    }
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  }, [activeSearchDealId]);
+
+useEffect(() => {
+  if (activeResultIndex === null) return;
+  const previous = document.body.style.overflow;
+  document.body.style.overflow = "hidden";
+  return () => {
+    document.body.style.overflow = previous;
+  };
+}, [activeResultIndex]);
 
   const resetFormState = (templateOverride?: TemplateOption) => {
     setManualDeals([defaultDeal()]);
@@ -417,10 +474,15 @@ export default function CampaignsPage() {
     setManualDeals((prev) => prev.map((deal) => (deal.id === dealId ? { ...deal, barcode: value } : deal)));
   };
 
-  const updateDealSearch = (dealId: string, value: string) => {
-    setManualDeals((prev) =>
-      prev.map((deal) => (deal.id === dealId ? { ...deal, productSearch: value, productId: value ? deal.productId : null } : deal))
-    );
+  const openSearchOverlay = (dealId: string) => {
+    const deal = manualDeals.find((item) => item.id === dealId);
+    setActiveSearchDealId(dealId);
+    setSearchQuery(deal?.productLabel || deal?.productSearch || "");
+  };
+
+  const closeSearchOverlay = () => {
+    setActiveSearchDealId(null);
+    setSearchQuery("");
   };
 
   const applyMappingToDeal = (dealId: string, product: ProductSummary, mapping: Record<ProductAttributeKey, string | null>) => {
@@ -462,6 +524,70 @@ export default function CampaignsPage() {
       setMappingDraft(fieldMapping);
       setMappingModalOpen(true);
     }
+    closeSearchOverlay();
+  };
+
+  const handleProductSelectFromOverlay = (product: ProductSummary) => {
+    if (!activeSearchDealId) return;
+    handleSelectProduct(activeSearchDealId, product);
+  };
+
+  const handleDownloadImage = async (url?: string, name?: string) => {
+    if (!url) return;
+    try {
+      const response = await fetch(url);
+      const blob = await response.blob();
+      const extension = blob.type.split("/")[1] || "png";
+      const fileName = name || `result-${Date.now()}.${extension}`;
+      saveAs(blob, fileName);
+    } catch {
+      showToast("error", "הורדת התמונה נכשלה");
+    }
+  };
+
+  const handleDownloadZip = async () => {
+    if (!generationResults.length) return;
+    try {
+      const zip = new JSZip();
+      const folder = zip.folder("campaign-results");
+      if (!folder) return;
+      const downloads = generationResults
+        .filter((result) => result.url)
+        .map(async (result, index) => {
+          const url = result.url as string;
+          const response = await fetch(url);
+          const blob = await response.blob();
+          const extension = blob.type.split("/")[1] || "png";
+          const fileName = `result-${index + 1}-${result.layout || "default"}.${extension}`;
+          folder.file(fileName, blob);
+        });
+      await Promise.all(downloads);
+      const content = await zip.generateAsync({ type: "blob" });
+      saveAs(content, `campaign-results-${Date.now()}.zip`);
+    } catch (error) {
+      console.error(error);
+      showToast("error", "אריזת ה-ZIP נכשלה");
+    }
+  };
+
+  const openResultViewer = (index: number) => {
+    setActiveResultIndex(index);
+  };
+
+  const closeResultViewer = () => setActiveResultIndex(null);
+
+  const goToPreviousResult = () => {
+    setActiveResultIndex((prev) => {
+      if (prev === null) return prev;
+      return prev === 0 ? generationResults.length - 1 : prev - 1;
+    });
+  };
+
+  const goToNextResult = () => {
+    setActiveResultIndex((prev) => {
+      if (prev === null) return prev;
+      return prev === generationResults.length - 1 ? 0 : prev + 1;
+    });
   };
 
   const handleConfirmMapping = () => {
@@ -536,7 +662,7 @@ export default function CampaignsPage() {
     const value = fieldValueFromDeal(field.id, deal);
     if (field.type === "image") {
       return (
-        <div key={`${deal.id}-${field.id}`} className="rounded-2xl border border-dashed border-slate-200 p-4">
+        <div key={`${deal.id}-${field.id}`} className="sm:col-span-2 xl:col-span-3 rounded-2xl border border-dashed border-slate-200 p-4">
           <p className="text-xs font-semibold text-slate-500">{field.label}</p>
           <div className="mt-2 flex items-center gap-4">
             <div className="h-16 w-16 overflow-hidden rounded-xl bg-slate-100">
@@ -560,7 +686,7 @@ export default function CampaignsPage() {
       );
     }
     return (
-      <div key={`${deal.id}-${field.id}`} className="input-group">
+      <div key={`${deal.id}-${field.id}`} className="input-group min-h-[56px]">
         <span className="input-icon">{field.type === "number" ? <Hash className="h-4 w-4" /> : <FileText className="h-4 w-4" />}</span>
         <input
           type={field.type === "number" ? "number" : "text"}
@@ -610,14 +736,14 @@ export default function CampaignsPage() {
           setCsvErrors([]);
         }
         const rows = (results.data as Papa.ParseResult<Record<string, string>>["data"]).map((row, idx) => {
-          const barcode = row["barcode"]?.trim();
-          const product = products.find((p) => p.barcode === barcode);
-          return {
-            rowNumber: idx + 2,
-            data: row,
-            productFound: Boolean(product),
-            productId: product?.id,
-            missingReason: product ? undefined : "מוצר לא קיים בספרייה",
+            const barcode = row["barcode"]?.trim();
+            const product = products.find((p) => p.barcode === barcode);
+            return {
+              rowNumber: idx + 2,
+              data: row,
+              productFound: Boolean(product),
+              productId: product?.id,
+              missingReason: product ? undefined : "מוצר לא קיים בספרייה",
           } as CsvEntry;
         });
         setCsvEntries(rows);
@@ -632,6 +758,79 @@ const buildOverrideValue = (fieldId: string, value: string, template?: TemplateO
   const attributeKey = field?.attributeKey || (field?.type === "image" ? "image_url" : "payload");
   if (!attributeKey) return null;
   return { [attributeKey]: value };
+};
+
+const ResultViewerOverlay = ({
+  results,
+  index,
+  onClose,
+  onPrev,
+  onNext,
+  onDownload,
+}: {
+  results: { dealId: string; layout?: string | null; url?: string; status: string }[];
+  index: number;
+  onClose: () => void;
+  onPrev: () => void;
+  onNext: () => void;
+  onDownload: () => void;
+}) => {
+  const result = results[index];
+  if (!result) return null;
+  const isSuccess = result.status === "success" && result.url;
+  return (
+    <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur">
+      <div className="absolute inset-0 flex flex-col">
+        <div className="flex items-center justify-between px-6 py-4 text-white">
+          <div>
+            <p className="text-lg font-semibold">
+              {result.layout || "ברירת מחדל"} • מוצר {result.dealId}
+            </p>
+            <p className="text-sm text-slate-300">
+              {index + 1}/{results.length}
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            {isSuccess && (
+              <>
+                <a
+                  className="btn-secondary flex items-center gap-1 text-xs"
+                  href={result.url}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  פתח בלשונית <ExternalLink className="h-3 w-3" />
+                </a>
+                <button className="btn-ghost text-xs text-white" onClick={onDownload}>
+                  הורד <Download className="mr-1 inline h-3 w-3" />
+                </button>
+              </>
+            )}
+            <button className="btn-ghost text-white" onClick={onClose}>
+              <X className="h-6 w-6" />
+            </button>
+          </div>
+        </div>
+        <div className="flex flex-1 items-center justify-center px-6 pb-10">
+          {isSuccess ? (
+            <img src={result.url} alt="result" className="max-h-full max-w-full rounded-3xl shadow-2xl" />
+          ) : (
+            <div className="text-white">לא ניתן להציג את התמונה</div>
+          )}
+        </div>
+        <div className="absolute inset-y-1/2 left-8 flex items-center">
+          <button className="btn-secondary rounded-full" onClick={onPrev}>
+            <ChevronDown className="rotate-90 transform" />
+          </button>
+        </div>
+        <div className="absolute inset-y-1/2 right-8 flex items-center">
+          <button className="btn-secondary rounded-full" onClick={onNext}>
+            <ChevronDown className="-rotate-90 transform" />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 };
 
 const manualDealsPayload = manualDeals.map((deal) => ({
@@ -687,17 +886,17 @@ const manualDealsPayload = manualDeals.map((deal) => ({
     } else {
       const successCount = data?.results?.filter((r: any) => r.status === "success").length ?? 0;
       const failCount = data?.results?.filter((r: any) => r.status === "error").length ?? 0;
-      setGenerationResults(
+      const normalizedResults =
         (data?.results ?? []).map((entry: any) => ({
           dealId: entry.dealId,
           layout: entry.layout,
           status: entry.status,
           url: extractResultUrl(entry.data),
           data: entry.data,
-        }))
-      );
-      if ((data?.results ?? []).length) {
-        setResultsModalOpen(true);
+        })) ?? [];
+      setGenerationResults(normalizedResults);
+      if (normalizedResults.length) {
+        setResultsDockOpen(true);
       }
       if (failCount) {
         showToast("error", `חלק מהבקשות נכשלו (${failCount}). בדוק את ההגדרות ונסה שוב.`);
@@ -813,16 +1012,13 @@ const manualDealsPayload = manualDeals.map((deal) => ({
             חזרה לרשימת הקמפיינים
           </button>
           {generationResults.length > 0 && (
-            <button className="btn-ghost" onClick={() => setResultsModalOpen(true)}>
-              הצג תוצאות אחרונות
+            <button className="btn-ghost" onClick={() => setResultsDockOpen((prev) => !prev)}>
+              {resultsDockOpen ? "מזער גלריה" : "הצג גלריה"}
             </button>
           )}
           <button className="btn-primary" onClick={handleSaveCampaignMeta}>
             {editingCampaign ? "שמור שינויים" : "שמור קמפיין"}
-          </button>
-          <button className="btn-secondary" onClick={handleGenerateCampaign} disabled={!canGenerate || generating}>
-            {generating ? <Loader2 className="h-4 w-4 animate-spin" /> : "צור תמונות לכל המבצעים"}
-          </button>
+        </button>
         </div>
       </div>
 
@@ -837,7 +1033,7 @@ const manualDealsPayload = manualDeals.map((deal) => ({
       )}
 
       <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-        <div className="grid gap-4 md:grid-cols-2">
+        <div className="grid gap-6">
           <div className="input-group">
             <span className="input-icon">
               <PenSquare className="h-4 w-4" />
@@ -850,107 +1046,158 @@ const manualDealsPayload = manualDeals.map((deal) => ({
             />
           </div>
 
-          <div className="input-group">
-            <span className="input-icon">
-              <LayoutGrid className="h-4 w-4" />
-            </span>
-            <select
-              className="input-control"
-              value={selectedTemplateId}
-              onChange={(e) => {
-                applyTemplateDefaults(e.target.value);
-                resetFormState();
-              }}
-            >
-              {templates.map((option) => (
-                <option key={option.id} value={option.id}>
-                  {option.name}
-                </option>
-              ))}
-            </select>
+          <div>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="text-sm font-semibold text-slate-700">בחר תבנית</p>
+                <p className="text-xs text-slate-500">צפה בתצוגה מקדימה של כל תבנית לפני הבחירה.</p>
+              </div>
+              {templatesLoading && (
+            <div className="flex items-center gap-2 text-xs text-slate-500">
+              <Loader2 className="h-3 w-3 animate-spin" /> טוען תבניות...
+            </div>
+              )}
+            </div>
+            {templatesError && (
+              <div className="mt-3 rounded-2xl bg-amber-50 p-3 text-xs text-amber-700">{templatesError}</div>
+            )}
+            <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {templates.map((tpl) => {
+                const active = tpl.id === selectedTemplateId;
+                const preview =
+                  tpl.previewUrl ||
+                  tpl.metadata?.formats?.[0]?.preview_url ||
+                  (tpl as any)?.preview_url ||
+                  tpl.details?.preview_url;
+                return (
+                  <button
+                    key={tpl.id}
+                    type="button"
+                    className={`flex flex-col rounded-3xl border p-3 text-right transition ${
+                      active ? "border-emerald-400 bg-emerald-50/40 shadow-lg" : "border-slate-200 hover:border-slate-300"
+                    }`}
+                    onClick={() => {
+                      applyTemplateDefaults(tpl.id, [], [], tpl);
+                      resetFormState(tpl);
+                    }}
+                  >
+                    <div className="aspect-[4/3] w-full overflow-hidden rounded-2xl bg-slate-100">
+                      {preview ? (
+                        <img src={preview} alt={tpl.name} className="h-full w-full object-cover transition duration-200 hover:scale-105" />
+                      ) : (
+                        <div className="flex h-full items-center justify-center text-sm text-slate-400">ללא תצוגה</div>
+                      )}
+                    </div>
+                    <div className="mt-3">
+                      <p className="text-sm font-semibold text-slate-700">{tpl.name}</p>
+                      <p className="text-xs text-slate-500">
+                          {tpl.layouts?.length ?? tpl.details?.formats?.length ?? 0} פריסות •{" "}
+                          {tpl.fields?.length ?? tpl.details?.elements?.length ?? 0} שדות
+                      </p>
+                    </div>
+                  </button>
+                );
+              })}
+              {!templates.length && !templatesLoading && (
+                <div className="rounded-3xl border border-dashed border-slate-200 p-4 text-center text-sm text-slate-500">
+                  לא נמצאו תבניות להצגה.
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
-        {templatesLoading && (
-          <div className="mt-3 flex items-center gap-2 text-xs text-slate-500">
-            <Loader2 className="h-3 w-3 animate-spin" /> טוען תבניות...
+        <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)]">
+          <div className="rounded-3xl border border-slate-200 p-4 shadow-sm">
+            <p className="text-sm font-semibold text-slate-700">תצוגה מקדימה</p>
+            <div className="mt-3 h-[220px] overflow-hidden rounded-2xl border border-slate-100 bg-slate-50">
+              {selectedTemplatePreview ? (
+                <img src={selectedTemplatePreview} alt={template.name} className="h-full w-full object-cover" />
+              ) : (
+                <div className="flex h-full items-center justify-center text-sm text-slate-400">אין תצוגה לתבנית זו</div>
+              )}
+            </div>
+            <div className="mt-3 text-xs text-slate-500">
+              <p>שם התבנית: {template.name}</p>
+              <p>מספר פריסות: {template.layouts.length}</p>
+              <p>מספר שדות: {template.fields.length}</p>
+            </div>
           </div>
-        )}
-        {templatesError && (
-          <div className="mt-3 rounded-2xl bg-amber-50 p-3 text-xs text-amber-700">{templatesError}</div>
-        )}
 
-        <div className="mt-4 grid gap-6 lg:grid-cols-2">
+          <div className="space-y-6">
           <div>
             <p className="text-sm font-semibold text-slate-700">שדות דינמיים</p>
             <p className="text-xs text-slate-500">בחר אילו שדות תרצה לעדכן עבור התבנית הנבחרת.</p>
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <div className="flex flex-wrap gap-2">
-                {template.fields.map((field) => {
-                  const active = selectedFields.includes(field.id);
-                  return (
-                    <button
-                      key={field.id}
-                      className={`pill ${active ? "badge-primary" : "bg-slate-100 text-slate-500"}`}
-                      onClick={() =>
-                        setSelectedFields((prev) =>
-                          active ? prev.filter((id) => id !== field.id) : [...prev, field.id]
-                        )
-                      }
-                    >
-                      {field.label}
-                    </button>
-                  );
-                })}
-              </div>
-              <button
-                type="button"
-                className="btn-ghost text-xs text-slate-500"
-                onClick={openMappingManager}
-                disabled={!selectedTemplateFields.length}
-              >
-                ניהול שיוך נתוני מוצר
-              </button>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <div className="flex flex-wrap gap-2">
+              {template.fields.map((field) => {
+                const active = selectedFields.includes(field.id);
+                return (
+                  <button
+                    key={field.id}
+                    className={`pill ${active ? "badge-primary" : "bg-slate-100 text-slate-500"}`}
+                    onClick={() =>
+                      setSelectedFields((prev) =>
+                        active ? prev.filter((id) => id !== field.id) : [...prev, field.id]
+                      )
+                    }
+                  >
+                    {field.label}
+                  </button>
+                );
+              })}
+                </div>
+                <button
+                  type="button"
+                  className="btn-ghost text-xs text-slate-500"
+                  onClick={openMappingManager}
+                  disabled={!selectedTemplateFields.length}
+                >
+                  ניהול שיוך נתוני מוצר
+                </button>
             </div>
           </div>
 
           <div>
             <p className="text-sm font-semibold text-slate-700">פריסות להפקה</p>
-            <p className="text-xs text-slate-500">ניתן לבחור כמה פריסות לייצור במקביל.</p>
-            <div className="mt-3 grid gap-3 sm:grid-cols-2">
-              {template.layouts.map((layout) => {
-                const active = selectedLayouts.includes(layout.id);
-                const { width, height } = getLayoutPreviewDimensions(layout.size);
-                return (
-                  <label
-                    key={layout.id}
-                    className={`flex cursor-pointer items-center gap-4 rounded-2xl border px-3 py-3 ${
-                      active ? "border-[var(--color-primary)] bg-emerald-50/40" : "border-slate-200"
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      className="sr-only"
-                      checked={active}
-                      onChange={(e) =>
-                        setSelectedLayouts((prev) =>
-                          e.target.checked ? [...prev, layout.id] : prev.filter((id) => id !== layout.id)
-                        )
-                      }
-                    />
-                    <div
-                      className="flex items-center justify-center rounded-xl border-2 border-dashed border-slate-300 bg-white"
-                      style={{ width, height }}
+              <p className="text-xs text-slate-500">בחר אילו פורמטים תרצה להפיק בקמפיין.</p>
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                {template.layouts.map((layout) => {
+                  const active = selectedLayouts.includes(layout.id);
+                  const { width, height } = getLayoutPreviewDimensions(layout.size);
+                  return (
+                    <label
+                      key={layout.id}
+                      className={`flex cursor-pointer flex-col gap-3 rounded-3xl border p-4 ${
+                        active ? "border-[var(--color-primary)] bg-emerald-50/40 shadow-sm" : "border-slate-200 hover:border-slate-300"
+                      }`}
                     >
-                      <div className="h-[70%] w-[70%] rounded border border-slate-400"></div>
-                    </div>
-                    <div className="flex flex-col">
-                      <span className="text-sm font-semibold text-slate-700">{layout.name}</span>
-                      <span className="text-xs text-slate-500">{layout.size}</span>
-                    </div>
-                  </label>
-                );
-              })}
+                  <input
+                    type="checkbox"
+                        className="sr-only"
+                        checked={active}
+                    onChange={(e) =>
+                      setSelectedLayouts((prev) =>
+                        e.target.checked ? [...prev, layout.id] : prev.filter((id) => id !== layout.id)
+                      )
+                    }
+                  />
+                      <div className="w-full">
+                        <span className="text-sm font-semibold text-slate-700">{layout.name}</span>
+                      </div>
+                      <div className="flex w-full flex-col items-center gap-2">
+                        <div
+                          className="flex w-full items-center justify-center rounded-2xl border-2 border-dashed border-slate-300 bg-white py-6"
+                          style={{ height: Math.max(96, height + 32) }}
+                        >
+                          <div className="rounded border border-slate-400" style={{ width, height }}></div>
+                        </div>
+                        <span className="text-xs text-slate-500">{layout.size}</span>
+                      </div>
+                </label>
+                  );
+                })}
+              </div>
             </div>
           </div>
         </div>
@@ -975,65 +1222,49 @@ const manualDealsPayload = manualDeals.map((deal) => ({
         {activeTab === "manual" ? (
           <div className="mt-4 space-y-4">
             {manualDeals.map((deal, index) => {
-              const query = deal.productSearch.trim();
-              const suggestions =
-                query.length > 1
-                  ? products
-                      .filter((product) => {
-                        const lower = query.toLowerCase();
-                        return (
-                          product.name.toLowerCase().includes(lower) || (product.barcode ?? "").includes(query)
-                        );
-                      })
-                      .slice(0, 6)
-                  : [];
               return (
                 <div key={deal.id} className="relative rounded-3xl border border-slate-100 p-4 shadow-sm">
-                  <div className="mb-3 flex items-center justify-between">
+                <div className="mb-3 flex items-center justify-between">
                     <div>
-                      <div className="text-sm font-semibold text-slate-700">מוצר #{index + 1}</div>
+                  <div className="text-sm font-semibold text-slate-700">מוצר #{index + 1}</div>
                       {deal.productLabel && (
                         <p className="text-xs text-slate-500">נבחר: {deal.productLabel}</p>
                       )}
                     </div>
-                    {manualDeals.length > 1 && (
-                      <button className="btn-ghost text-red-500" onClick={() => handleRemoveDeal(deal.id)}>
-                        <Trash2 className="h-4 w-4" /> הסר
-                      </button>
-                    )}
-                  </div>
+                  {manualDeals.length > 1 && (
+                    <button className="btn-ghost text-red-500" onClick={() => handleRemoveDeal(deal.id)}>
+                      <Trash2 className="h-4 w-4" /> הסר
+                    </button>
+                  )}
+                </div>
 
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <div className="relative">
-                      <label className="text-xs text-slate-500">חיפוש מהיר בספרייה</label>
-                      <div className="input-group mt-1">
-                        <span className="input-icon">
-                          <Search className="h-4 w-4" />
-                        </span>
-                        <input
-                          placeholder="כתוב שם מוצר או ברקוד"
-                          className="input-control"
-                          value={deal.productSearch}
-                          onChange={(e) => updateDealSearch(deal.id, e.target.value)}
-                        />
-                      </div>
-                      {suggestions.length > 0 && (
-                        <div className="absolute inset-x-0 top-[calc(100%+4px)] z-10 max-h-56 overflow-auto rounded-2xl border border-slate-100 bg-white shadow-xl">
-                          {suggestions.map((product) => (
-                            <button
-                              key={product.id}
-                              type="button"
-                              className="flex w-full items-center justify-between px-3 py-2 text-sm hover:bg-slate-50"
-                              onMouseDown={() => handleSelectProduct(deal.id, product)}
-                            >
-                              <span className="font-semibold text-slate-700">{product.name}</span>
-                              <span className="text-xs text-slate-400">{product.barcode}</span>
-                            </button>
-                          ))}
+                  <div className="grid gap-3 md:grid-cols-[minmax(0,2.5fr)_minmax(0,1fr)]">
+                    <div>
+                      <label className="text-xs text-slate-500">בחר מוצר מהספרייה</label>
+                      <button
+                        type="button"
+                        className={`input-control mt-1 flex items-center justify-between gap-3 text-right ${
+                          deal.productLabel ? "text-slate-800" : "text-slate-400"
+                        }`}
+                        onClick={() => openSearchOverlay(deal.id)}
+                      >
+                        <span className="truncate">{deal.productLabel || "לחץ כדי לחפש מוצר"}</span>
+                        <Search className="h-4 w-4 text-slate-400" />
+                      </button>
+                      {deal.productLabel && (
+                        <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-500">
+                          {deal.barcode && (
+                            <span className="rounded-full bg-slate-100 px-2 py-1 font-mono text-[11px] text-slate-600">
+                              {deal.barcode}
+                            </span>
+                          )}
+                          {deal.productId && (
+                            <span className="rounded-full bg-emerald-50 px-2 py-1 text-emerald-700">מוצר מקושר</span>
+                          )}
                         </div>
                       )}
                     </div>
-                    <div className="input-group mt-6 md:mt-0">
+                    <div className="input-group md:mt-0">
                       <span className="input-icon">
                         <Barcode className="h-4 w-4" />
                       </span>
@@ -1047,7 +1278,7 @@ const manualDealsPayload = manualDeals.map((deal) => ({
                   </div>
 
                   {selectedTemplateFields.length > 0 ? (
-                    <div className="mt-4 grid gap-4 md:grid-cols-2">
+                    <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                       {selectedTemplateFields.map((field) => renderFieldInput(field, deal))}
                     </div>
                   ) : (
@@ -1117,7 +1348,7 @@ const manualDealsPayload = manualDeals.map((deal) => ({
                             {entry.productFound ? (
                               <span className="text-emerald-600">
                                 <CheckCircle2 className="mr-1 inline h-4 w-4" /> נמצא
-                              </span>
+                    </span>
                             ) : (
                               <span className="text-amber-600">
                                 <AlertTriangle className="mr-1 inline h-4 w-4" /> {entry.missingReason}
@@ -1144,9 +1375,169 @@ const manualDealsPayload = manualDeals.map((deal) => ({
     </>
   );
 
+  const mainPaddingBottom =
+    generationResults.length > 0 ? (resultsDockOpen ? "40vh" : "140px") : "56px";
+  const stickyButtonBottom =
+    generationResults.length > 0 ? (resultsDockOpen ? "calc(30vh + 24px)" : "96px") : "24px";
+
   return (
-    <div className="flex flex-col gap-6">
-      {viewMode === "list" ? listView : builderView}
+    <div className="relative">
+      <div
+        className={`flex flex-col gap-6 transition duration-200 ${activeSearchDealId ? "blur-sm" : ""}`}
+        style={{ paddingBottom: mainPaddingBottom }}
+      >
+        {viewMode === "list" ? listView : builderView}
+      </div>
+
+      {viewMode === "builder" && (
+        <div className="pointer-events-none fixed right-6 z-40" style={{ bottom: stickyButtonBottom }}>
+          <button
+            className="pointer-events-auto rounded-full bg-[var(--color-primary)] px-8 py-4 text-base font-semibold text-white shadow-xl"
+            onClick={handleGenerateCampaign}
+            disabled={!canGenerate || generating}
+          >
+            {generating ? <Loader2 className="mr-2 inline h-5 w-5 animate-spin" /> : "צור תמונות"}
+          </button>
+        </div>
+      )}
+
+      {activeSearchDealId && (
+        <div className="fixed inset-0 z-50 bg-white/90 backdrop-blur-lg">
+          <div className="mx-auto flex h-full max-w-5xl flex-col gap-8 px-4 py-12">
+            <div className="flex items-center gap-4">
+              <div className="flex-1 rounded-[32px] border-2 border-slate-300 bg-white shadow-sm">
+                    <input
+                  autoFocus
+                  className="w-full rounded-[32px] border-none bg-transparent px-6 py-5 text-3xl focus:outline-none"
+                  placeholder="הקלד שם מוצר, ספק או ברקוד..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                />
+              </div>
+              <button className="btn-ghost text-slate-600" onClick={closeSearchOverlay}>
+                <X className="h-6 w-6" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-auto">
+              {displayedProducts.length ? (
+                <div className="grid gap-4 md:grid-cols-2">
+                  {displayedProducts.map((product) => (
+                    <button
+                      key={product.id}
+                      type="button"
+                      className="flex gap-4 rounded-3xl border border-slate-100 bg-white p-4 text-right shadow-sm transition hover:border-[var(--color-primary)]"
+                      onClick={() => handleProductSelectFromOverlay(product)}
+                    >
+                      <div className="h-20 w-20 overflow-hidden rounded-2xl bg-slate-100">
+                        {product.image_url ? (
+                          <img src={product.image_url} alt={product.name} className="h-full w-full object-cover" />
+                        ) : (
+                          <div className="flex h-full items-center justify-center text-slate-400">
+                            <ImageIcon className="h-6 w-6" />
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <p className="text-base font-semibold text-slate-800">{product.name}</p>
+                        <p className="text-xs text-slate-500">{product.supplier_name || "ללא ספק"}</p>
+                        <span className="text-xs font-mono text-slate-500">{product.barcode || "ללא ברקוד"}</span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="flex h-full items-center justify-center text-sm text-slate-500">
+                  לא נמצאו מוצרים תואמים
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {generationResults.length > 0 && (
+        <div
+          className="fixed inset-x-0 bottom-0 z-30 border-t border-slate-200 bg-white/95 shadow-[0_-12px_30px_rgba(15,23,42,0.08)] backdrop-blur"
+          style={{ height: resultsDockOpen ? "30vh" : "88px" }}
+        >
+          <div className="flex items-center justify-between px-5 py-3">
+            <div>
+              <p className="text-sm font-semibold text-slate-700">תמונות שנוצרו</p>
+              <p className="text-xs text-slate-500">
+                {generationResults.length} תוצאות • גלול כדי לראות הכל
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button className="btn-ghost text-xs text-slate-500" onClick={() => setGenerationResults([])}>
+                נקה תוצאות
+              </button>
+              <button className="btn-primary flex items-center gap-2 text-xs" onClick={handleDownloadZip}>
+                הורד ZIP <Download className="h-3 w-3" />
+              </button>
+              <button className="btn-secondary" onClick={() => setResultsDockOpen((prev) => !prev)}>
+                {resultsDockOpen ? (
+                  <>
+                    מזער <ChevronDown className="mr-1 inline h-4 w-4" />
+                  </>
+                ) : (
+                  <>
+                    פתח <ChevronUp className="mr-1 inline h-4 w-4" />
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+          {resultsDockOpen && (
+            <div className="flex h-[calc(30vh-80px)] gap-4 overflow-x-auto px-5 pb-5">
+              {generationResults.map((result, idx) => {
+                const isSuccess = result.status === "success" && result.url;
+                return (
+                  <div
+                    key={`${result.dealId}-${result.layout ?? "default"}-${idx}`}
+                    className="min-w-[220px] rounded-3xl border border-slate-100 bg-white p-3 shadow-sm"
+                  >
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-semibold text-slate-600">{result.layout || "ברירת מחדל"}</span>
+                      <span className={`pill text-[11px] ${isSuccess ? "badge-primary" : "bg-red-100 text-red-700"}`}>
+                        {isSuccess ? "הצלחה" : "שגיאה"}
+                      </span>
+                    </div>
+                    <div className="mt-2 overflow-hidden rounded-2xl border border-slate-100 bg-slate-50">
+                      {isSuccess ? (
+                        <button onClick={() => openResultViewer(idx)}>
+                          <img src={result.url} alt="תוצאה" className="h-32 w-full object-cover transition hover:opacity-80" />
+                        </button>
+                      ) : (
+                        <div className="flex h-32 items-center justify-center text-slate-400">
+                          <AlertTriangle className="h-6 w-6" />
+                        </div>
+                      )}
+                    </div>
+                    {result.status !== "success" && (
+                      <p className="mt-2 text-[11px] text-red-600">{result.data?.message || "נכשלה וריאציה זו"}</p>
+                    )}
+                    {isSuccess && (
+                      <div className="mt-2 flex flex-col gap-1 text-xs">
+                        <a className="btn-secondary text-center" href={result.url} target="_blank" rel="noreferrer">
+                          פתח
+                        </a>
+                        <div className="flex gap-1">
+                          <button className="btn-ghost flex-1" onClick={() => handleCopyResultLink(result.url)}>
+                            העתק
+                          </button>
+                          <button className="btn-ghost flex-1" onClick={() => handleDownloadImage(result.url, `result-${idx + 1}.png`)}>
+                            הורד
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       <Modal open={mappingModalOpen} onClose={handleCloseMapping} title="שיוך נתוני מוצר לשדות">
         <p className="text-sm text-slate-600">בחר לאילו שדות בתבנית ימופו נתוני המוצר (שם, תיאור, תמונה וכו').</p>
@@ -1189,66 +1580,21 @@ const manualDealsPayload = manualDeals.map((deal) => ({
         </div>
       </Modal>
 
-      <Modal
-        open={resultsModalOpen && generationResults.length > 0}
-        onClose={() => setResultsModalOpen(false)}
-        title="תמונות שנוצרו"
-      >
-        <div className="flex items-center justify-between gap-3">
-          <p className="text-sm text-slate-600">לחץ על תמונה לפתיחה בלשונית או העתק קישור.</p>
-          <button
-            className="btn-ghost text-xs text-slate-500"
-            onClick={() => {
-              setGenerationResults([]);
-              setResultsModalOpen(false);
-            }}
-          >
-            נקה תוצאות
-          </button>
-        </div>
-        <div className="mt-4 grid max-h-[70vh] gap-4 overflow-auto md:grid-cols-2">
-          {generationResults.map((result, idx) => {
-            const isSuccess = result.status === "success" && result.url;
-            return (
-              <div key={`${result.dealId}-${result.layout ?? "default"}-${idx}`} className="rounded-2xl border border-slate-100 p-3 shadow-sm">
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <p className="text-xs text-slate-500">מוצר: {result.dealId}</p>
-                    {result.layout && <p className="text-xs text-slate-400">פריסה: {result.layout}</p>}
-                  </div>
-                  <span className={`pill text-xs ${isSuccess ? "badge-primary" : "bg-red-100 text-red-700"}`}>
-                    {isSuccess ? "הצלחה" : "שגיאה"}
-                  </span>
-                </div>
-                <div className="mt-3 overflow-hidden rounded-2xl border border-slate-100 bg-slate-50">
-                  {isSuccess ? (
-                    <a href={result.url} target="_blank" rel="noreferrer">
-                      <img src={result.url} alt="result" className="h-48 w-full object-cover" />
-                    </a>
-                  ) : (
-                    <div className="flex h-48 items-center justify-center text-slate-400">
-                      <AlertTriangle className="h-8 w-8" />
-                    </div>
-                  )}
-                </div>
-                {result.status !== "success" && (
-                  <p className="mt-2 text-xs text-red-600">{result.data?.message || "נכשלה הפקה של וריאציה זו"}</p>
-                )}
-                {isSuccess && (
-                  <div className="mt-3 flex gap-2">
-                    <a className="btn-secondary flex-1 text-center text-xs" href={result.url} target="_blank" rel="noreferrer">
-                      פתח בלשונית
-                    </a>
-                    <button className="btn-ghost flex-1 text-xs" onClick={() => handleCopyResultLink(result.url)}>
-                      העתק קישור
-                    </button>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </Modal>
+      {activeResultIndex !== null && generationResults[activeResultIndex] && (
+        <ResultViewerOverlay
+          results={generationResults}
+          index={activeResultIndex}
+          onClose={closeResultViewer}
+          onPrev={goToPreviousResult}
+          onNext={goToNextResult}
+          onDownload={() =>
+            handleDownloadImage(
+              generationResults[activeResultIndex]?.url,
+              `result-${activeResultIndex + 1}-${generationResults[activeResultIndex]?.layout || "default"}.png`
+            )
+          }
+        />
+      )}
     </div>
   );
 }
