@@ -1,0 +1,15 @@
+@font-face {
+  font-family: 'Almoni Neue';
+  src: url('../assets/fonts/almoni-neue-aaa-medium-OFFICE.ttf') format('truetype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Almoni Neue';
+  src: url('../assets/fonts/almoni-bold-aaa.otf') format('opentype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
