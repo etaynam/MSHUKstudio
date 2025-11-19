@@ -6,6 +6,8 @@ import DashboardHome from './pages/DashboardHome';
 import LibraryPage from './pages/LibraryPage';
 import SuppliersPage from './pages/SuppliersPage';
 import AiStudioPage from './pages/AiStudioPage';
+import CampaignsPage from './pages/CampaignsPage';
+import SettingsPage from './pages/SettingsPage';
 import './App.css';
 
 function App() {
@@ -17,6 +19,8 @@ function App() {
         <Route path="library" element={<LibraryPage />} />
         <Route path="suppliers" element={<SuppliersPage />} />
         <Route path="ai-studio" element={<AiStudioPage />} />
+        <Route path="campaigns" element={<CampaignsPage />} />
+        <Route path="settings" element={<SettingsPage />} />
       </Route>
     </Routes>
   );

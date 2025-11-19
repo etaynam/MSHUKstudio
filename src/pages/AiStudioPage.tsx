@@ -11,6 +11,7 @@ import {
   Layers,
   Wand2,
   Check,
+  FileText,
 } from "lucide-react";
 
 interface Supplier {
@@ -35,6 +36,7 @@ interface GalleryRun {
   selectedImageId: string | null;
   name: string;
   barcode: string;
+  description: string;
   supplierId: string;
   attachProductId: string;
   saving?: "new" | "attach" | null;
@@ -168,6 +170,7 @@ export default function AiStudioPage() {
           selectedImageId: images[0]?.id ?? null,
           name: productName,
           barcode: "",
+          description: "",
           supplierId: "",
           attachProductId: "",
           saving: null,
@@ -220,10 +223,12 @@ export default function AiStudioPage() {
 
     setRunSaving(runId, "new");
     try {
+      const descriptionValue = run.description?.trim();
       const { error: insertError } = await supabase.from("products").insert({
         name: run.name.trim(),
         barcode: run.barcode || null,
         supplier_id: run.supplierId || null,
+        description: descriptionValue || null,
         image_url: imageUrl,
       });
       if (insertError) throw insertError;
@@ -250,9 +255,14 @@ export default function AiStudioPage() {
 
     setRunSaving(runId, "attach");
     try {
+      const updatePayload: Record<string, any> = { image_url: imageUrl };
+      const desc = run.description?.trim();
+      if (desc) {
+        updatePayload.description = desc;
+      }
       const { error: updateError } = await supabase
         .from("products")
-        .update({ image_url: imageUrl })
+        .update(updatePayload)
         .eq("id", run.attachProductId);
       if (updateError) throw updateError;
       setGallery((prev) => prev.filter((item) => item.id !== runId));
@@ -507,6 +517,20 @@ export default function AiStudioPage() {
                       onChange={(e) => updateRunField(run.id, "barcode", e.target.value)}
                     />
                   </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-sm text-slate-500">תיאור מוצר</label>
+                  <div className="input-group items-start">
+                    <span className="input-icon">
+                      <FileText className="h-4 w-4" />
+                    </span>
+                    <textarea
+                      placeholder="תיאור קצר כפי שיופיע במערכת"
+                      className="input-control min-h-[80px] resize-y"
+                      value={run.description}
+                      onChange={(e) => updateRunField(run.id, "description", e.target.value)}
+                    />
+                  </div>
+                </div>
                   <div className="input-group">
                     <span className="input-icon">
                       <Building2 className="h-4 w-4" />

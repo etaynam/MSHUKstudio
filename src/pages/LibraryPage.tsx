@@ -13,6 +13,7 @@ import {
   Edit,
   Package,
   Barcode,
+  FileText,
   Search,
   Users as UsersIcon,
   UploadCloud,
@@ -31,6 +32,7 @@ interface Product {
   supplier_id: string | null;
   name: string;
   barcode: string | null;
+  description?: string | null;
   image_url?: string | null;
   supplier?: Supplier | null;
 }
@@ -53,7 +55,7 @@ interface DashboardOutletContext {
 }
 
 const initialSupplierForm = { name: "", logo_url: "", brand_color: "" };
-const initialProductForm = { name: "", barcode: "", supplier_id: "", image_url: "" };
+const initialProductForm = { name: "", barcode: "", description: "", supplier_id: "", image_url: "" };
 
 export default function LibraryPage() {
   const { sidebarOpen, toggleSidebar } = useOutletContext<DashboardOutletContext>();
@@ -97,6 +99,7 @@ export default function LibraryPage() {
     setProductForm({
       name: product.name,
       barcode: product.barcode ?? "",
+      description: product.description ?? "",
       supplier_id: product.supplier_id ?? "",
       image_url: product.image_url ?? "",
     });
@@ -262,6 +265,7 @@ export default function LibraryPage() {
       name: productForm.name.trim(),
       barcode: productForm.barcode || null,
       supplier_id: productForm.supplier_id || null,
+      description: productForm.description || null,
       image_url: productForm.image_url || null,
     };
 
@@ -436,6 +440,11 @@ export default function LibraryPage() {
                 <p className="text-sm text-slate-500 line-clamp-1" title={product.barcode || "אין ברקוד"}>
                   ברקוד: {product.barcode || "לא הוגדר"}
                 </p>
+                {product.description && (
+                  <p className="text-xs text-slate-500 line-clamp-2" title={product.description}>
+                    {product.description}
+                  </p>
+                )}
                 <div className="mt-auto flex flex-col gap-2 rounded-2xl bg-slate-50 p-3">
                   <div className="text-xs text-slate-500">גרסאות: {totalVersions}</div>
                   <div className="flex flex-wrap gap-2 text-xs text-slate-600">
@@ -721,6 +730,22 @@ export default function LibraryPage() {
               value={productForm.barcode}
               onChange={(e) => setProductForm((prev) => ({ ...prev, barcode: e.target.value }))}
             />
+          </div>
+          <div className="flex flex-col gap-2">
+            <label className="text-sm text-slate-500">תיאור מוצר</label>
+            <div className="input-group items-start">
+              <span className="input-icon">
+                <FileText className="h-4 w-4" />
+              </span>
+              <textarea
+                placeholder="כתוב תיאור קצר על המוצר"
+                className="input-control min-h-[90px] resize-y"
+                value={productForm.description}
+                onChange={(e) =>
+                  setProductForm((prev) => ({ ...prev, description: e.target.value }))
+                }
+              />
+            </div>
           </div>
           <div className="flex flex-col gap-2">
             <label className="text-sm text-slate-500">תמונת מוצר</label>
