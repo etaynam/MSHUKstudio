@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Papa from "papaparse";
 import { supabase } from "../lib/supabaseClient";
 import { Modal } from "../components/ui/modal";
-import JSZip from "jszip";
 import { saveAs } from "file-saver";
 import {
   Package,
@@ -165,6 +164,16 @@ const extractResultUrl = (data: any) => {
     data.media?.url ||
     ""
   );
+};
+
+const base64ToBlob = (base64: string, type = "application/octet-stream") => {
+  const decoded = atob(base64);
+  const length = decoded.length;
+  const bytes = new Uint8Array(length);
+  for (let i = 0; i < length; i++) {
+    bytes[i] = decoded.charCodeAt(i);
+  }
+  return new Blob([bytes], { type });
 };
 
 const getLayoutPreviewDimensions = (size: string) => {
@@ -547,25 +556,30 @@ useEffect(() => {
 
   const handleDownloadZip = async () => {
     if (!generationResults.length) return;
+    const entries = generationResults
+      .filter((result) => result.status === "success" && result.url)
+      .map((result, index) => ({
+        url: result.url,
+        fileName: `result-${index + 1}-${result.layout || "default"}.png`,
+      }));
+    if (!entries.length) {
+      showToast("error", "אין תמונות זמינות להורדה");
+      return;
+    }
     try {
-      const zip = new JSZip();
-      const folder = zip.folder("campaign-results");
-      if (!folder) return;
-      const downloads = generationResults
-        .filter((result) => result.url)
-        .map(async (result, index) => {
-          const url = result.url as string;
-          const response = await fetch(url);
-          const blob = await response.blob();
-          const extension = blob.type.split("/")[1] || "png";
-          const fileName = `result-${index + 1}-${result.layout || "default"}.${extension}`;
-          folder.file(fileName, blob);
-        });
-      await Promise.all(downloads);
-      const content = await zip.generateAsync({ type: "blob" });
-      saveAs(content, `campaign-results-${Date.now()}.zip`);
-    } catch (error) {
-      console.error(error);
+      const { data, error } = await supabase.functions.invoke("results-zip", {
+        body: {
+          entries,
+          fileName: `campaign-results-${Date.now()}.zip`,
+        },
+      });
+      if (error || data?.error || !data?.zipBase64) {
+        throw new Error(error?.message || data?.error || "zip generation failed");
+      }
+      const blob = base64ToBlob(data.zipBase64, "application/zip");
+      saveAs(blob, data.fileName || `campaign-results-${Date.now()}.zip`);
+    } catch (err) {
+      console.error(err);
       showToast("error", "אריזת ה-ZIP נכשלה");
     }
   };
@@ -794,37 +808,50 @@ const ResultViewerOverlay = ({
             {isSuccess && (
               <>
                 <a
-                  className="btn-secondary flex items-center gap-1 text-xs"
+                  className="flex items-center gap-1 rounded-full bg-emerald-400 px-4 py-2 text-xs font-semibold text-slate-900 shadow hover:bg-emerald-300"
                   href={result.url}
                   target="_blank"
                   rel="noreferrer"
                 >
                   פתח בלשונית <ExternalLink className="h-3 w-3" />
                 </a>
-                <button className="btn-ghost text-xs text-white" onClick={onDownload}>
+                <button
+                  className="flex items-center gap-1 rounded-full bg-emerald-400 px-4 py-2 text-xs font-semibold text-slate-900 shadow hover:bg-emerald-300"
+                  onClick={onDownload}
+                >
                   הורד <Download className="mr-1 inline h-3 w-3" />
                 </button>
               </>
             )}
-            <button className="btn-ghost text-white" onClick={onClose}>
+            <button className="rounded-full bg-white/10 p-2 text-white hover:bg-white/20" onClick={onClose}>
               <X className="h-6 w-6" />
             </button>
           </div>
         </div>
         <div className="flex flex-1 items-center justify-center px-6 pb-10">
           {isSuccess ? (
-            <img src={result.url} alt="result" className="max-h-full max-w-full rounded-3xl shadow-2xl" />
+            <img
+              src={result.url}
+              alt="result"
+              className="max-h-[75vh] max-w-[85vw] rounded-3xl object-contain shadow-2xl"
+            />
           ) : (
             <div className="text-white">לא ניתן להציג את התמונה</div>
           )}
         </div>
         <div className="absolute inset-y-1/2 left-8 flex items-center">
-          <button className="btn-secondary rounded-full" onClick={onPrev}>
+          <button
+            className="rounded-full bg-emerald-400 p-3 text-slate-900 shadow hover:bg-emerald-300"
+            onClick={onPrev}
+          >
             <ChevronDown className="rotate-90 transform" />
           </button>
         </div>
         <div className="absolute inset-y-1/2 right-8 flex items-center">
-          <button className="btn-secondary rounded-full" onClick={onNext}>
+          <button
+            className="rounded-full bg-emerald-400 p-3 text-slate-900 shadow hover:bg-emerald-300"
+            onClick={onNext}
+          >
             <ChevronDown className="-rotate-90 transform" />
           </button>
         </div>
@@ -1032,9 +1059,12 @@ const manualDealsPayload = manualDeals.map((deal) => ({
         </div>
       )}
 
+      <div className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
+        <div className="space-y-6">
       <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-        <div className="grid gap-6">
-          <div className="input-group">
+            <p className="text-sm font-semibold text-slate-700">שם הקמפיין</p>
+            <p className="text-xs text-slate-500">בחר כותרת שתופיע ברשימת הקמפיינים ותעזור להתמצא.</p>
+            <div className="input-group mt-3">
             <span className="input-icon">
               <PenSquare className="h-4 w-4" />
             </span>
@@ -1045,23 +1075,34 @@ const manualDealsPayload = manualDeals.map((deal) => ({
               onChange={(e) => setProjectTitle(e.target.value)}
             />
           </div>
+            <div className="mt-4 grid grid-cols-2 gap-3 rounded-2xl bg-slate-50 p-3 text-center text-xs text-slate-500">
+              <div>
+                <p className="text-[10px] uppercase text-slate-400">שדות נבחרים</p>
+                <p className="text-base font-semibold text-slate-800">{selectedFields.length}</p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase text-slate-400">פריסות נבחרות</p>
+                <p className="text-base font-semibold text-slate-800">{selectedLayouts.length}</p>
+              </div>
+            </div>
+          </section>
 
-          <div>
-            <div className="flex flex-wrap items-center justify-between gap-2">
+          <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="flex items-center justify-between gap-3">
               <div>
                 <p className="text-sm font-semibold text-slate-700">בחר תבנית</p>
-                <p className="text-xs text-slate-500">צפה בתצוגה מקדימה של כל תבנית לפני הבחירה.</p>
+                <p className="text-xs text-slate-500">תצוגות מקדימות קטנות שמרגישות כמו ממשק.</p>
               </div>
               {templatesLoading && (
-            <div className="flex items-center gap-2 text-xs text-slate-500">
-              <Loader2 className="h-3 w-3 animate-spin" /> טוען תבניות...
-            </div>
+                <div className="flex items-center gap-2 text-xs text-slate-500">
+                  <Loader2 className="h-3 w-3 animate-spin" /> טוען...
+                </div>
               )}
             </div>
             {templatesError && (
               <div className="mt-3 rounded-2xl bg-amber-50 p-3 text-xs text-amber-700">{templatesError}</div>
             )}
-            <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            <div className="mt-4 max-h-[520px] space-y-3 overflow-auto pr-1">
               {templates.map((tpl) => {
                 const active = tpl.id === selectedTemplateId;
                 const preview =
@@ -1073,69 +1114,86 @@ const manualDealsPayload = manualDeals.map((deal) => ({
                   <button
                     key={tpl.id}
                     type="button"
-                    className={`flex flex-col rounded-3xl border p-3 text-right transition ${
-                      active ? "border-emerald-400 bg-emerald-50/40 shadow-lg" : "border-slate-200 hover:border-slate-300"
+                    className={`flex w-full items-center gap-3 rounded-2xl border bg-white p-2 text-right transition ${
+                      active ? "border-[var(--color-primary)] shadow-md" : "border-slate-200 hover:border-slate-300"
                     }`}
                     onClick={() => {
                       applyTemplateDefaults(tpl.id, [], [], tpl);
                       resetFormState(tpl);
                     }}
                   >
-                    <div className="aspect-[4/3] w-full overflow-hidden rounded-2xl bg-slate-100">
+                    <div className="h-16 w-16 shrink-0 overflow-hidden rounded-xl bg-slate-100">
                       {preview ? (
-                        <img src={preview} alt={tpl.name} className="h-full w-full object-cover transition duration-200 hover:scale-105" />
+                        <img src={preview} alt={tpl.name} className="h-full w-full object-cover" />
                       ) : (
-                        <div className="flex h-full items-center justify-center text-sm text-slate-400">ללא תצוגה</div>
+                        <div className="flex h-full items-center justify-center text-[11px] text-slate-400">אין תצוגה</div>
                       )}
-                    </div>
-                    <div className="mt-3">
+          </div>
+                    <div className="flex-1">
                       <p className="text-sm font-semibold text-slate-700">{tpl.name}</p>
-                      <p className="text-xs text-slate-500">
-                          {tpl.layouts?.length ?? tpl.details?.formats?.length ?? 0} פריסות •{" "}
-                          {tpl.fields?.length ?? tpl.details?.elements?.length ?? 0} שדות
+                      <p className="text-[11px] text-slate-500">
+                        {tpl.layouts?.length ?? tpl.details?.formats?.length ?? 0} פורמטים • {
+                          tpl.fields?.length ?? tpl.details?.elements?.length ?? 0
+                        } שדות
                       </p>
                     </div>
+                    {active && <CheckCircle2 className="h-4 w-4 text-[var(--color-primary)]" />}
                   </button>
                 );
               })}
               {!templates.length && !templatesLoading && (
-                <div className="rounded-3xl border border-dashed border-slate-200 p-4 text-center text-sm text-slate-500">
+                <div className="rounded-2xl border border-dashed border-slate-200 p-4 text-center text-sm text-slate-500">
                   לא נמצאו תבניות להצגה.
                 </div>
               )}
             </div>
-          </div>
+          </section>
         </div>
 
-        <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)]">
-          <div className="rounded-3xl border border-slate-200 p-4 shadow-sm">
-            <p className="text-sm font-semibold text-slate-700">תצוגה מקדימה</p>
-            <div className="mt-3 h-[220px] overflow-hidden rounded-2xl border border-slate-100 bg-slate-50">
-              {selectedTemplatePreview ? (
-                <img src={selectedTemplatePreview} alt={template.name} className="h-full w-full object-cover" />
-              ) : (
-                <div className="flex h-full items-center justify-center text-sm text-slate-400">אין תצוגה לתבנית זו</div>
-              )}
-            </div>
-            <div className="mt-3 text-xs text-slate-500">
-              <p>שם התבנית: {template.name}</p>
-              <p>מספר פריסות: {template.layouts.length}</p>
-              <p>מספר שדות: {template.fields.length}</p>
-            </div>
-          </div>
+        <div className="space-y-6">
+          <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="grid gap-6 lg:grid-cols-[minmax(0,240px)_minmax(0,1fr)]">
+              <div>
+                <p className="text-sm font-semibold text-slate-700">תצוגה מקדימה</p>
+                <div className="mt-3 rounded-2xl border border-slate-100 bg-slate-50 p-3">
+                  <div className="aspect-[4/5] overflow-hidden rounded-2xl bg-white">
+                    {selectedTemplatePreview ? (
+                      <img src={selectedTemplatePreview} alt={template.name} className="h-full w-full object-cover" />
+                    ) : (
+                      <div className="flex h-full items-center justify-center text-xs text-slate-400">אין תצוגה זמינה</div>
+                    )}
+                  </div>
+                  <div className="mt-3 rounded-xl bg-white p-3 text-xs text-slate-500 shadow-inner">
+                    <p>שם התבנית: {template.name}</p>
+                    <p>מספר פריסות: {template.layouts.length}</p>
+                    <p>מספר שדות: {template.fields.length}</p>
+                  </div>
+                </div>
+              </div>
 
-          <div className="space-y-6">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="rounded-2xl border border-slate-100 p-4">
+                  <div className="flex items-center justify-between">
           <div>
             <p className="text-sm font-semibold text-slate-700">שדות דינמיים</p>
-            <p className="text-xs text-slate-500">בחר אילו שדות תרצה לעדכן עבור התבנית הנבחרת.</p>
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                <div className="flex flex-wrap gap-2">
+                      <p className="text-xs text-slate-500">בחר אילו שדות תרצה לעדכן.</p>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn-ghost text-xs text-slate-500"
+                      onClick={openMappingManager}
+                      disabled={!selectedTemplateFields.length}
+                    >
+                      ניהול שיוכים
+                    </button>
+                  </div>
+                  <div className="mt-3 flex max-h-[220px] flex-wrap gap-2 overflow-auto pr-1">
               {template.fields.map((field) => {
                 const active = selectedFields.includes(field.id);
                 return (
                   <button
                     key={field.id}
-                    className={`pill ${active ? "badge-primary" : "bg-slate-100 text-slate-500"}`}
+                          className={`pill text-xs ${active ? "badge-primary" : "bg-slate-100 text-slate-500"}`}
                     onClick={() =>
                       setSelectedFields((prev) =>
                         active ? prev.filter((id) => id !== field.id) : [...prev, field.id]
@@ -1146,62 +1204,57 @@ const manualDealsPayload = manualDeals.map((deal) => ({
                   </button>
                 );
               })}
-                </div>
-                <button
-                  type="button"
-                  className="btn-ghost text-xs text-slate-500"
-                  onClick={openMappingManager}
-                  disabled={!selectedTemplateFields.length}
-                >
-                  ניהול שיוך נתוני מוצר
-                </button>
+                    {!template.fields.length && <span className="text-xs text-slate-400">אין שדות זמינים</span>}
             </div>
           </div>
 
-          <div>
+                <div className="rounded-2xl border border-slate-100 p-4">
             <p className="text-sm font-semibold text-slate-700">פריסות להפקה</p>
-              <p className="text-xs text-slate-500">בחר אילו פורמטים תרצה להפיק בקמפיין.</p>
-              <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                {template.layouts.map((layout) => {
-                  const active = selectedLayouts.includes(layout.id);
-                  const { width, height } = getLayoutPreviewDimensions(layout.size);
-                  return (
-                    <label
-                      key={layout.id}
-                      className={`flex cursor-pointer flex-col gap-3 rounded-3xl border p-4 ${
-                        active ? "border-[var(--color-primary)] bg-emerald-50/40 shadow-sm" : "border-slate-200 hover:border-slate-300"
-                      }`}
-                    >
+                  <p className="text-xs text-sלקate-500">בחר את הפרופורציות להפקה.</p>
+                  <div className="mt-3 space-y-3">
+                    {template.layouts.map((layout) => {
+                      const active = selectedLayouts.includes(layout.id);
+                      const { width, height } = getLayoutPreviewDimensions(layout.size);
+                      return (
+                        <label
+                          key={layout.id}
+                          className={`flex cursor-pointer items-center gap-3 rounded-2xl border p-3 ${
+                            active ? "border-[var(--color-primary)] bg-emerald-50/40" : "border-slate-200 hover:border-slate-300"
+                          }`}
+                        >
                   <input
                     type="checkbox"
-                        className="sr-only"
-                        checked={active}
+                            className="sr-only"
+                            checked={active}
                     onChange={(e) =>
                       setSelectedLayouts((prev) =>
                         e.target.checked ? [...prev, layout.id] : prev.filter((id) => id !== layout.id)
                       )
                     }
                   />
-                      <div className="w-full">
-                        <span className="text-sm font-semibold text-slate-700">{layout.name}</span>
-                      </div>
-                      <div className="flex w-full flex-col items-center gap-2">
-                        <div
-                          className="flex w-full items-center justify-center rounded-2xl border-2 border-dashed border-slate-300 bg-white py-6"
-                          style={{ height: Math.max(96, height + 32) }}
-                        >
-                          <div className="rounded border border-slate-400" style={{ width, height }}></div>
-                        </div>
-                        <span className="text-xs text-slate-500">{layout.size}</span>
-                      </div>
+                          <div className="flex items-center justify-center rounded-2xl border-2 border-dashed border-slate-300 bg-white p-3">
+                            <div className="rounded border border-slate-400" style={{ width, height }}></div>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-sm font-semibold text-sלקate-700">{layout.name}</p>
+                            <p className="text-xs text-sלקate-500">{layout.size || "—"}</p>
+                          </div>
                 </label>
-                  );
-                })}
-              </div>
+                      );
+                    })}
+                    {!template.layouts.length && (
+                      <div className="rounded-2xl border border-dashed border-sלקate-200 p-3 text-xs text-sלקate-500">
+                        אין פריסות זמינות לתבנית זו.
+                      </div>
+                    )}
+                  </div>
             </div>
           </div>
         </div>
       </section>
+        </div>
+      </div>
+
 
       <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
         <div className="flex flex-wrap gap-3 border-b border-slate-100 pb-3 text-sm">
@@ -1239,8 +1292,8 @@ const manualDealsPayload = manualDeals.map((deal) => ({
                 </div>
 
                   <div className="grid gap-3 md:grid-cols-[minmax(0,2.5fr)_minmax(0,1fr)]">
-                    <div>
-                      <label className="text-xs text-slate-500">בחר מוצר מהספרייה</label>
+                  <div>
+                    <label className="text-xs text-slate-500">בחר מוצר מהספרייה</label>
                       <button
                         type="button"
                         className={`input-control mt-1 flex items-center justify-between gap-3 text-right ${
@@ -1261,24 +1314,24 @@ const manualDealsPayload = manualDeals.map((deal) => ({
                           {deal.productId && (
                             <span className="rounded-full bg-emerald-50 px-2 py-1 text-emerald-700">מוצר מקושר</span>
                           )}
-                        </div>
+                  </div>
                       )}
                     </div>
                     <div className="input-group md:mt-0">
-                      <span className="input-icon">
-                        <Barcode className="h-4 w-4" />
-                      </span>
-                      <input
-                        placeholder="ברקוד"
-                        className="input-control"
-                        value={deal.barcode}
+                    <span className="input-icon">
+                      <Barcode className="h-4 w-4" />
+                    </span>
+                    <input
+                      placeholder="ברקוד"
+                      className="input-control"
+                      value={deal.barcode}
                         onChange={(e) => updateDealBarcode(deal.id, e.target.value)}
-                      />
-                    </div>
+                    />
                   </div>
+                </div>
 
-                  {selectedTemplateFields.length > 0 ? (
-                    <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                      {selectedTemplateFields.length > 0 ? (
+                    <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
                       {selectedTemplateFields.map((field) => renderFieldInput(field, deal))}
                     </div>
                   ) : (
